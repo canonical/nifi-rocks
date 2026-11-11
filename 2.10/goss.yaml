@@ -9,6 +9,14 @@ command:
     stdout:
       - '/openjdk version "21\./'
 
+  # Java's default trust store must hold the public CAs. If the java-cacerts part
+  # breaks, the JRE's cacerts symlink dangles and every TLS call from Java fails
+  java-cacerts-populated:
+    exec: "$JAVA_HOME/bin/keytool -list -cacerts -storepass changeit 2>/dev/null | grep -c trustedCertEntry"
+    exit-status: 0
+    stdout:
+      - "/^[1-9][0-9]+$/"
+
   nifi-framework-nar-version:
     exec: "ls /opt/nifi/lib/nifi-framework-nar-*.nar"
     exit-status: 0
@@ -187,6 +195,12 @@ file:
     filetype: file
     owner: root
     group: root
+  /etc/ssl/certs/java/cacerts:
+    exists: true
+    filetype: file
+    owner: root
+    group: root
+    mode: "0644"
 
 port:
   # Jetty binds a dual-stack IPv6 wildcard socket, so the listener only appears in /proc/net/tcp6.
