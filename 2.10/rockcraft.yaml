@@ -53,6 +53,21 @@ parts:
       - openjdk-21-jre-headless
       - ca-certificates
 
+  # The JRE's lib/security/cacerts is a symlink to /etc/ssl/certs/java/cacerts,
+  # which only exists after ca-certificates-java's install hook has run. Staged
+  # packages never run hooks, so without this part the symlink dangles and Java
+  # trusts no CA at all. Running the hook at build time needs the JRE installed 
+  # too: ca-certificates-java alone writes nothing.
+  java-cacerts:
+    plugin: nil
+    build-packages:
+      - openjdk-21-jre-headless
+      - ca-certificates-java
+    override-build: |
+      set -eu
+      install -D -m 644 /etc/ssl/certs/java/cacerts \
+        "${CRAFT_PART_INSTALL}/etc/ssl/certs/java/cacerts"
+
   nifi:
     plugin: dump
     after: [runtime]
