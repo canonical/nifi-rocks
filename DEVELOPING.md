@@ -118,6 +118,23 @@ against the same container - useful when adding or debugging assertions.
 
 ---
 
+## Publishing the Rock
+
+`.github/workflows/publish.yaml` publishes the rock to
+`ghcr.io/canonical/nifi-rocks/nifi` whenever a change to a version directory lands on `main`. Only the version directories touched by the push are rebuilt, and changes to the goss files alone do not trigger a publish.
+
+Each build is pushed under two tags: the major.minor line (`2.10`), which floats to the newest build and is what the charm's `upstream-source` points at, and the full version (`2.10.0`). The digest is printed in the run's job summary for pinning.
+
+To publish without a change, for example after a failed run, trigger the workflow manually from the Actions tab, optionally naming a single version directory:
+
+```bash
+gh workflow run publish.yaml -f rock-dir=2.10
+```
+
+This is the edge image the charm consumes. Governed releases to Docker Hub go through [OCI Factory](https://github.com/canonical/oci-factory) and are separate.
+
+---
+
 ## Artifact sourcing and verification
 
 The rock consumes the `-ubuntuN` artifact built from source by the SOSS pipeline and published by

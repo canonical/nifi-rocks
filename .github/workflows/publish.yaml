@@ -1,0 +1,169 @@
+name: Publish rock to GHCR
+
+# Publishes the edge rock to ghcr.io/<owner>/<repo>/<rock name> (for this repo,
+# ghcr.io/canonical/nifi-rocks/nifi) whenever a rock definition changes on main.
+# The governed release path (tracks, risks, EOL, blocking CVE scan, Docker Hub)
+# is OCI Factory and is separate from this.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "[0-9]*.[0-9]*/**"
+      # goss files only change the tests, not the image.
+      - "!**/goss*.yaml"
+  workflow_dispatch:
+    inputs:
+      rock-dir:
+        description: "Version directory to publish, e.g. 2.10. Leave empty to publish all of them."
+        required: false
+        default: ""
+
+# Never cancel a publish half way through pushing tags, but don't let two runs
+# race on the same tags either.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Determine rocks to publish
+    runs-on: ubuntu-24.04
+    outputs:
+      rock-dirs: ${{ steps.dirs.outputs.rock-dirs }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # On push, only the version directories the push touched are rebuilt, so a
+      # fix to an older version publishes that version rather than the newest.
+      - name: Determine version directories
+        id: dirs
+        env:
+          INPUT_DIR: ${{ inputs.rock-dir }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          all_dirs() {
+            find . -mindepth 2 -maxdepth 2 -name rockcraft.yaml -printf '%h\n' | sed 's@^\./@@'
+          }
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ -n "${INPUT_DIR}" ]]; then
+              if [[ ! -f "${INPUT_DIR}/rockcraft.yaml" ]]; then
+                echo "::error::${INPUT_DIR}/rockcraft.yaml does not exist"
+                exit 1
+              fi
+              dirs="${INPUT_DIR}"
+            else
+              dirs="$(all_dirs)"
+            fi
+          elif [[ "${BEFORE}" =~ ^0+$ ]]; then
+            dirs="$(all_dirs)"
+          else
+            dirs="$(git diff --name-only "${BEFORE}" "${GITHUB_SHA}" \
+              | grep -vE '/goss[^/]*\.yaml$' \
+              | cut -d/ -f1 | sort -u \
+              | while read -r d; do [[ -f "${d}/rockcraft.yaml" ]] && echo "${d}"; done || true)"
+          fi
+
+          echo "Publishing: ${dirs:-nothing}"
+          echo "rock-dirs=$(printf '%s\n' "${dirs}" | jq -R . | jq -sc 'map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish ${{ matrix.rock-dir }}
+    needs: prepare
+    if: needs.prepare.outputs.rock-dirs != '[]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        rock-dir: ${{ fromJSON(needs.prepare.outputs.rock-dirs) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # Derive the image name and tags from the rock definition so they cannot
+      # drift from what was actually built. The major.minor tag floats to the
+      # newest build of that line and is what the charm's upstream-source uses,
+      # the same scheme as ghcr.io/canonical/temporal-rocks/temporal-server:1.31.
+      - name: Read rock metadata
+        id: meta
+        env:
+          ROCK_DIR: ${{ matrix.rock-dir }}
+        run: |
+          set -euo pipefail
+
+          name="$(yq '.name' "${ROCK_DIR}/rockcraft.yaml")"
+          version="$(yq '.version' "${ROCK_DIR}/rockcraft.yaml")"
+
+          {
+            echo "image=ghcr.io/${GITHUB_REPOSITORY,,}/${name}"
+            echo "version=${version}"
+            echo "minor=$(cut -d. -f1-2 <<< "${version}")"
+          } >> "$GITHUB_OUTPUT"
+
+      # Frees ~20 GB. The build pulls a ~784 MB artifact and primes the full
+      # distribution before pruning, so the default runner disk is tight.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
+      - name: Pack rock
+        id: pack
+        uses: canonical/craft-actions/rockcraft/pack@acd2f2e61c7563b38ba89390ca0e910fa7d2784f
+        with:
+          path: ${{ matrix.rock-dir }}
+
+      - name: Push to ghcr.io
+        env:
+          ROCK: ${{ steps.pack.outputs.rock }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          MINOR: ${{ steps.meta.outputs.minor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          for tag in $(printf '%s\n' "${MINOR}" "${VERSION}" | sort -u); do
+            echo "Pushing ${IMAGE}:${tag}"
+            rockcraft.skopeo --insecure-policy copy \
+              "oci-archive:${ROCK}" \
+              "docker://${IMAGE}:${tag}" \
+              --dest-creds "${GITHUB_ACTOR}:${GHCR_TOKEN}"
+          done
+
+      # Surface the digest in the job summary so pinning the charm to it doesn't
+      # mean going and inspecting the registry.
+      - name: Report published digest
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          MINOR: ${{ steps.meta.outputs.minor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          digest="$(rockcraft.skopeo inspect \
+            --creds "${GITHUB_ACTOR}:${GHCR_TOKEN}" \
+            "docker://${IMAGE}:${VERSION}" | jq -r .Digest)"
+
+          {
+            echo "### Published ${IMAGE}"
+            echo
+            echo '```'
+            echo "${IMAGE}:${MINOR}"
+            echo "${IMAGE}:${VERSION}"
+            echo "${IMAGE}@${digest}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
