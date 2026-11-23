@@ -116,6 +116,14 @@ against the same container - useful when adding or debugging assertions.
 > `/proc/net/tcp6`; an IPv4-only check never matches even though the port is
 > serving.
 
+## Releasing
+
+Merging a change under `2.10/` to `main` runs the “Release changed rocks to OCI
+Factory” workflow, which opens a PR on `canonical/oci-factory` as
+`wf-charmers-bot`. Start a manual release or dry run from the Actions tab using
+`workflow_dispatch`. A dry run generates the OCI Factory change without opening
+a PR.
+
 ---
 
 ## Artifact sourcing and verification
