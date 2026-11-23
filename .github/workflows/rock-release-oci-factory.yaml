@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "2.10/**"
+      - "!2.10/goss*.yaml"
 
   workflow_dispatch:
     inputs:
